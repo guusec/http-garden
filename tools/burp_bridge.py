@@ -59,6 +59,8 @@ class BurpBridgeHandler(BaseHTTPRequestHandler):
             self.handle_test_request()
         elif parsed_path.path == '/raw':
             self.handle_raw_request()
+        elif parsed_path.path == '/repl':
+            self.handle_repl_request()
         else:
             self.send_error(404, "Not Found")
     
@@ -89,7 +91,11 @@ class BurpBridgeHandler(BaseHTTPRequestHandler):
             
             # Debug: Show what we received
             print(f"[DEBUG] Bridge received structured request for {command} command")
-            print(f"[DEBUG] Payload preview: {payload[0][:200].decode('latin1', errors='replace')}")
+            try:
+                preview = payload[0][:200].decode('utf-8', errors='replace')
+            except:
+                preview = repr(payload[0][:200])
+            print(f"[DEBUG] Payload preview: {preview}")
             print(f"[DEBUG] Targets: {targets}")
             
             # Execute the REPL command
@@ -119,27 +125,38 @@ class BurpBridgeHandler(BaseHTTPRequestHandler):
             # This is the key - take ANY HTTP request and make it a REPL payload
             payload = [raw_http]
             
-            # Debug: Show raw data type and content
-            print(f"[DEBUG] Raw data type: {type(raw_http)}")
-            print(f"[DEBUG] Raw data repr: {repr(raw_http)[:100]}...")
+            # Debug: Show exactly what we received
+            print(f"[DEBUG] Raw HTTP type: {type(raw_http)}")
+            print(f"[DEBUG] Raw HTTP length: {len(raw_http)}")
+            print(f"[DEBUG] Raw HTTP first 100 chars: {repr(raw_http[:100])}")
             
-            # Convert Java array to proper bytes if needed
-            if hasattr(raw_http, '__iter__') and not isinstance(raw_http, (bytes, str)):
-                print("[DEBUG] Converting from iterable to bytes")
-                try:
-                    raw_http = bytes(raw_http)
-                except Exception as e:
-                    print(f"[DEBUG] First conversion failed: {e}")
-                    try:
-                        raw_http = bytes([int(b) for b in raw_http])
-                    except Exception as e2:
-                        print(f"[DEBUG] Second conversion failed: {e2}")
-                        # Last resort - convert string representation
-                        raw_http = str(raw_http).encode('latin1')
+            # Decode base64 to get original raw bytes
+            import base64
+            try:
+                # Try to decode as base64 first
+                if isinstance(raw_http, bytes):
+                    b64_string = raw_http.decode('ascii')
+                else:
+                    b64_string = str(raw_http)
+                
+                print(f"[DEBUG] Base64 string preview: {b64_string[:50]}...")
+                raw_http = base64.b64decode(b64_string)
+                print(f"[DEBUG] Successfully decoded base64 data to {len(raw_http)} bytes")
+                
+            except Exception as e:
+                print(f"[DEBUG] Base64 decode failed: {e}")
+                print(f"[DEBUG] Treating as raw data")
+                # If not base64, treat as raw bytes
+                if isinstance(raw_http, str):
+                    raw_http = raw_http.encode('latin1')
             
             # Debug: Show what we received after conversion
             print(f"[DEBUG] Bridge received {len(raw_http)} bytes for {command} command")
-            print(f"[DEBUG] Request preview: {raw_http[:200].decode('latin1', errors='replace')}")
+            try:
+                preview = raw_http[:200].decode('utf-8', errors='replace')
+            except:
+                preview = repr(raw_http[:200])
+            print(f"[DEBUG] Request preview: {preview}")
             print(f"[DEBUG] Targets: {targets}")
             
             # Default to all servers if no targets specified
@@ -154,6 +171,79 @@ class BurpBridgeHandler(BaseHTTPRequestHandler):
             
         except Exception as e:
             self.send_json_response({'error': str(e)}, status=500)
+    
+    def handle_repl_request(self):
+        """Handle REPL-formatted requests from Burp Suite."""
+        print(f"[DEBUG] handle_repl_request called!")
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            print(f"[DEBUG] Content-Length: {content_length}")
+            
+            repl_payload = self.rfile.read(content_length).decode('utf-8')
+            print(f"[DEBUG] Read {len(repl_payload)} chars from request body")
+            
+            # Parse query parameters for command options
+            parsed_path = urlparse(self.path)
+            query_params = parse_qs(parsed_path.query)
+            print(f"[DEBUG] Query params: {query_params}")
+            
+            command = query_params.get('command', ['grid'])[0]
+            targets = query_params.get('targets', [])
+            if targets:
+                targets = targets[0].split(',')
+            
+            # Debug: Show what we received
+            print(f"[DEBUG] Bridge received REPL payload for {command} command")
+            print(f"[DEBUG] REPL payload length: {len(repl_payload)} chars")
+            print(f"[DEBUG] REPL payload preview: {repl_payload[:200]}...")
+            print(f"[DEBUG] Targets: {targets}")
+            
+            # Convert REPL payload back to bytes for processing
+            # This reverses the hex escape encoding done by Burp extension
+            request_bytes = self.repl_format_to_bytes(repl_payload)
+            payload = [request_bytes]
+            
+            # Execute the REPL command
+            result = self.execute_repl_command(payload, command, targets)
+            
+            self.send_json_response(result)
+            
+        except Exception as e:
+            print(f"[DEBUG] Error in handle_repl_request: {e}")
+            self.send_json_response({'error': str(e)}, status=500)
+    
+    def repl_format_to_bytes(self, repl_payload):
+        """Convert REPL format back to bytes."""
+        result = []
+        i = 0
+        while i < len(repl_payload):
+            if repl_payload[i] == '\\' and i + 1 < len(repl_payload):
+                next_char = repl_payload[i + 1]
+                if next_char == 'r':
+                    result.append(13)  # CR
+                    i += 2
+                elif next_char == 'n':
+                    result.append(10)  # LF
+                    i += 2
+                elif next_char == 't':
+                    result.append(9)   # Tab
+                    i += 2
+                elif next_char == 'x' and i + 3 < len(repl_payload):
+                    # Hex escape like \x41
+                    hex_str = repl_payload[i + 2:i + 4]
+                    try:
+                        result.append(int(hex_str, 16))
+                        i += 4
+                    except ValueError:
+                        result.append(ord('\\'))  # Invalid hex, treat as literal backslash
+                        i += 1
+                else:
+                    result.append(ord('\\'))  # Literal backslash
+                    i += 1
+            else:
+                result.append(ord(repl_payload[i]))
+                i += 1
+        return bytes(result)
     
     def execute_repl_command(self, payload: List[bytes], command: str, targets: List[str]) -> Dict[str, Any]:
         """Execute REPL command exactly like the REPL does - this is the core functionality."""
