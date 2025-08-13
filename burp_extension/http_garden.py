@@ -36,6 +36,8 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
         self._stdout = PrintWriter(callbacks.getStdout(), True)
         self._stderr = PrintWriter(callbacks.getStderr(), True)
         
+        self._stdout.println("HTTP Garden: Extension starting to load...")
+        
         # Default settings - MUST be set before UI creation
         self.bridge_host = "localhost"
         self.bridge_port = "8888"
@@ -50,23 +52,30 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
         
         # Set extension name
         callbacks.setExtensionName("HTTP Garden")
+        self._stdout.println("HTTP Garden: Set extension name")
         
         # Register context menu factory
         callbacks.registerContextMenuFactory(self)
+        self._stdout.println("HTTP Garden: Registered context menu factory")
         
         # Register message editor tab factory for response tabs
         callbacks.registerMessageEditorTabFactory(self)
+        self._stdout.println("HTTP Garden: Registered message editor tab factory")
         
         # Set up global key bindings
         self._setup_key_bindings()
+        self._stdout.println("HTTP Garden: Set up key bindings")
         
         # Create UI tab
         try:
             self._create_ui()
             callbacks.addSuiteTab(self)
+            self._stdout.println("HTTP Garden: Created UI tab successfully")
         except Exception as e:
             self._stderr.println("Failed to create UI tab: {}".format(str(e)))
             self._stderr.println("Extension will work without UI tab")
+        
+        self._stdout.println("HTTP Garden: Extension loaded successfully!")
 
     def _create_ui(self):
         """Create the extension UI tab."""
@@ -149,6 +158,7 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
     
     def createMenuItems(self, invocation):
         """Create context menu items."""
+        self._stdout.println("HTTP Garden: createMenuItems called with context: {}".format(invocation.getInvocationContext()))
         menu_items = ArrayList()
         
         # Only show menu for requests
@@ -159,11 +169,13 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
             invocation.CONTEXT_TARGET_SITE_MAP_TABLE,
             invocation.CONTEXT_TARGET_SITE_MAP_TREE
         ]:
+            self._stdout.println("HTTP Garden: Context matches, creating menu items")
             # Create menu items with keyboard shortcuts
             grid_item = JMenuItem("HTTP Garden: Grid Analysis")
             grid_item.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_G, KeyEvent.CTRL_DOWN_MASK))
-            grid_item.addActionListener(lambda event: self.send_to_garden(invocation, "grid"))
+            grid_item.addActionListener(lambda event: (self._stdout.println("HTTP Garden: Grid menu item clicked"), self.send_to_garden(invocation, "grid")))
             menu_items.add(grid_item)
+            self._stdout.println("HTTP Garden: Added grid menu item")
             
             fanout_item = JMenuItem("HTTP Garden: Fanout Analysis") 
             fanout_item.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F, KeyEvent.CTRL_DOWN_MASK | KeyEvent.SHIFT_DOWN_MASK))
@@ -185,11 +197,15 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
     
     def send_to_garden(self, invocation, command):
         """Send ANY HTTP request from Burp to HTTP Garden for analysis."""
+        self._stdout.println("HTTP Garden: send_to_garden called with command: {}".format(command))
+        
         # Get the selected request
         messages = invocation.getSelectedMessages()
         if not messages:
             self._stderr.println("No messages selected")
             return
+        
+        self._stdout.println("HTTP Garden: Found {} messages".format(len(messages)))
         
         # Use the first selected message
         message = messages[0]
@@ -199,17 +215,97 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
             self._stderr.println("No request found")
             return
         
-        # Convert request to string - let the bridge handle byte conversion
-        request_string = self._helpers.bytesToString(request)
+        self._stdout.println("HTTP Garden: Got request with {} bytes".format(len(request)))
+        
+        # Convert Burp's byte array to actual Python bytes
+        try:
+            self._stdout.println("HTTP Garden: Request type: {}".format(type(request)))
+            self._stdout.println("HTTP Garden: Request length: {}".format(len(request)))
+            self._stdout.println("HTTP Garden: First few elements: {}".format([request[i] for i in range(min(10, len(request)))]))
+            
+            # Handle different types of request objects from Burp
+            if str(type(request)) == "<type 'array.array'>":
+                # Direct conversion from Java array.array
+                self._stdout.println("HTTP Garden: Converting from array.array")
+                byte_list = []
+                for i in range(len(request)):
+                    val = request[i]
+                    self._stdout.println("HTTP Garden: Element {}: {} (type: {})".format(i, val, type(val)))
+                    if i >= 5:  # Only show first 5 for debugging
+                        break
+                    byte_list.append(int(val) & 0xFF)
+                # Continue with the rest without debug output
+                for i in range(5, len(request)):
+                    byte_list.append(int(request[i]) & 0xFF)
+                # Don't use bytes() in Jython - work directly with the list
+                request_bytes = byte_list
+                self._stdout.println("HTTP Garden: Using byte_list directly with {} elements".format(len(byte_list)))
+                self._stdout.println("HTTP Garden: byte_list first 5: {}".format(byte_list[:5]))
+            elif hasattr(request, '__len__') and hasattr(request, '__getitem__'):
+                # Generic sequence conversion
+                self._stdout.println("HTTP Garden: Converting from generic sequence")
+                request_bytes = bytes([int(request[i]) & 0xFF for i in range(len(request))])
+            else:
+                # Fallback
+                self._stdout.println("HTTP Garden: Using fallback conversion")
+                request_bytes = bytes(request)
+            
+            self._stdout.println("HTTP Garden: Converted to {} bytes".format(len(request_bytes)))
+            self._stdout.println("HTTP Garden: request_bytes type: {}".format(type(request_bytes)))
+            
+            # Check what's actually in request_bytes
+            if len(request_bytes) > 0:
+                first_few = []
+                for i in range(min(10, len(request_bytes))):
+                    val = request_bytes[i]
+                    first_few.append(repr(val))
+                self._stdout.println("HTTP Garden: First few bytes (repr): {}".format(first_few))
+            
+            # Convert to REPL format: single line with hex escapes
+            repl_payload = self._bytes_to_repl_format(request_bytes)
+            self._stdout.println("HTTP Garden: Converted to REPL format: {} chars".format(len(repl_payload)))
+            
+        except Exception as e:
+            self._stderr.println("HTTP Garden: Error converting request: {}".format(str(e)))
+            return
         
         # Log what we're sending
         self._stdout.println("HTTP Garden: Sending to bridge ({} command):".format(command))
-        self._stdout.println("Request content: {}...".format(request_string[:200].replace('\r', '\\r').replace('\n', '\\n')))
+        self._stdout.println("REPL payload length: {} chars".format(len(repl_payload)))
+        self._stdout.println("REPL payload preview: {}...".format(repl_payload[:200]))
+        self._stdout.println("Bridge URL will be: http://{}:{}/repl?command={}".format(self.bridge_host, self.bridge_port, command))
         
         # Send to bridge in a separate thread
-        thread = threading.Thread(target=self._send_request_to_bridge, args=(request_string, command, None))
+        thread = threading.Thread(target=self._send_request_to_bridge, args=(repl_payload, command, None))
         thread.daemon = True
         thread.start()
+    
+    def _bytes_to_repl_format(self, request_bytes):
+        """Convert bytes/list to REPL format: ASCII chars + hex escapes for non-ASCII."""
+        result = []
+        for byte_val in request_bytes:
+            # Ensure byte_val is an integer
+            if isinstance(byte_val, str):
+                byte_val = ord(byte_val)
+            elif not isinstance(byte_val, int):
+                byte_val = int(byte_val)
+            
+            # Handle negative values (convert to unsigned byte)
+            if byte_val < 0:
+                byte_val = byte_val & 0xFF
+            
+            if byte_val == 13:  # CR
+                result.append('\\r')
+            elif byte_val == 10:  # LF
+                result.append('\\n')
+            elif byte_val == 9:   # Tab
+                result.append('\\t')
+            elif 32 <= byte_val <= 126:  # Printable ASCII
+                result.append(chr(byte_val))
+            else:  # Non-ASCII or non-printable
+                # Use string formatting instead of hex()
+                result.append('\\x%02x' % byte_val)
+        return ''.join(result)
     
     def send_to_garden_with_targets(self, invocation, command, targets):
         """Send ANY HTTP request from Burp to HTTP Garden with specific targets."""
@@ -227,20 +323,28 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
             self._stderr.println("No request found")
             return
         
-        # Convert request to string - let the bridge handle byte conversion
-        request_string = self._helpers.bytesToString(request)
+        # Convert Burp's byte array to actual Python bytes
+        if hasattr(request, '__len__') and hasattr(request, '__getitem__'):
+            request_bytes = bytes([request[i] & 0xFF for i in range(len(request))])
+        else:
+            request_bytes = bytes(request)
+        
+        # Convert to REPL format: single line with hex escapes
+        repl_payload = self._bytes_to_repl_format(request_bytes)
         
         # Log what we're sending
         self._stdout.println("HTTP Garden: Sending to bridge ({} command with targets: {}):".format(command, targets))
-        self._stdout.println("Request content: {}...".format(request_string[:200].replace('\r', '\\r').replace('\n', '\\n')))
+        self._stdout.println("REPL payload length: {} chars".format(len(repl_payload)))
+        self._stdout.println("REPL payload preview: {}...".format(repl_payload[:200]))
+        self._stdout.println("Bridge URL will be: http://{}:{}/repl?command={}".format(self.bridge_host, self.bridge_port, command))
         
         # Send to bridge in a separate thread
-        thread = threading.Thread(target=self._send_request_to_bridge, args=(request_string, command, targets))
+        thread = threading.Thread(target=self._send_request_to_bridge, args=(repl_payload, command, targets))
         thread.daemon = True
         thread.start()
     
-    def _send_request_to_bridge(self, request_string, command, targets=None):
-        """Send raw HTTP request bytes to the HTTP Garden bridge."""
+    def _send_request_to_bridge(self, repl_payload, command, targets=None):
+        """Send REPL-formatted HTTP request to the HTTP Garden bridge."""
         try:
             import urllib2
             
@@ -253,19 +357,32 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
                 port = self._port_field.getText()
             
             # Build URL with targets if specified
-            bridge_url = "http://{}:{}/raw?command={}".format(host, port, command)
+            bridge_url = "http://{}:{}/repl?command={}".format(host, port, command)
             if targets:
                 bridge_url += "&targets={}".format(",".join(targets))
             
-            # Send the request string as UTF-8 bytes
-            request_data = request_string.encode('utf-8')
+            # Send the REPL payload as plain text
+            request_data = repl_payload.encode('utf-8')
+            
+            self._stdout.println("HTTP Garden: About to send request to: {}".format(bridge_url))
+            self._stdout.println("HTTP Garden: Request data length: {} bytes".format(len(request_data)))
             
             # Create HTTP request to bridge
             req = urllib2.Request(bridge_url, request_data)
-            req.add_header('Content-Type', 'application/octet-stream')
+            req.add_header('Content-Type', 'text/plain')
+            
+            self._stdout.println("HTTP Garden: Sending HTTP request...")
             
             # Send request
-            response = urllib2.urlopen(req, timeout=30)
+            try:
+                self._stdout.println("HTTP Garden: Calling urllib2.urlopen...")
+                response = urllib2.urlopen(req, timeout=30)
+                self._stdout.println("HTTP Garden: urllib2.urlopen succeeded!")
+            except Exception as e:
+                self._stdout.println("HTTP Garden: urllib2.urlopen failed: {}".format(str(e)))
+                raise
+            
+            self._stdout.println("HTTP Garden: Received response with status: {}".format(response.getcode()))
             response_data = response.read()
             
             # Parse JSON response
@@ -276,11 +393,14 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
             self._display_console_results(result, command)
             
             # Update message editor tabs with results
-            self._update_message_editor_tabs(request_string, result, command)
+            self._update_message_editor_tabs(repl_payload, result, command)
             
         except Exception as e:
+            import traceback
             error_msg = "Error sending request to HTTP Garden: {}".format(str(e))
             self._stderr.println(error_msg)
+            self._stderr.println("Full traceback:")
+            self._stderr.println(traceback.format_exc())
             self._stderr.println("Make sure bridge is running: python3 tools/burp_bridge.py")
             if hasattr(self, '_results_area'):
                 self._results_area.setText(error_msg)
@@ -408,7 +528,7 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
             self._stderr.println("Bridge connection test failed: {}".format(str(e)))
             self._stderr.println("Make sure bridge is running: python3 tools/burp_bridge.py")
     
-    def _update_message_editor_tabs(self, request_string, result, command):
+    def _update_message_editor_tabs(self, repl_payload, result, command):
         """Update all message editor tabs with the results."""
         try:
             # Create formatted results for the tab
@@ -423,8 +543,8 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
             else:
                 formatted_results += "No results available\n"
             
-            # Calculate hash for this request
-            request_hash = hash(request_string.encode('utf-8'))
+            # Calculate hash for this request (repl_payload is string)
+            request_hash = hash(repl_payload)
             
             # Update all tab instances
             for tab in self._tab_instances:
@@ -437,10 +557,9 @@ class BurpExtender(IBurpExtender, IContextMenuFactory, ITab, IMessageEditorTabFa
     def _get_current_request_from_focus(self):
         """Get the last request content we've seen."""
         if self._last_request_content:
-            # Debug: Show what we're about to send
-            request_string = self._last_request_content.decode('utf-8')
+            # Debug: Show what we're about to send (REPL format preview)
             self._stdout.println("HTTP Garden: Using captured request for analysis:")
-            self._stdout.println("Request: {}...".format(request_string[:200].replace('\r', '\\r').replace('\n', '\\n')))
+            self._stdout.println("REPL payload: {}...".format(self._last_request_content[:200]))
             return self._last_request_content
         else:
             self._stderr.println("No request content available. Open a request in Repeater first.")
@@ -553,14 +672,11 @@ class HTTPGardenGlobalAction(AbstractAction):
                 else:
                     self._extender._stdout.println("Executing {} command via global shortcut".format(self._command))
                 
-                # Convert bytes to string for sending
-                if isinstance(current_request, bytes):
-                    request_string = current_request.decode('utf-8')
-                else:
-                    request_string = current_request
+                # current_request is already REPL formatted string
+                repl_payload = current_request
                 
                 # Send to bridge in a separate thread
-                thread = threading.Thread(target=self._extender._send_request_to_bridge, args=(request_string, self._command, self._targets))
+                thread = threading.Thread(target=self._extender._send_request_to_bridge, args=(repl_payload, self._command, self._targets))
                 thread.daemon = True
                 thread.start()
             else:
@@ -606,13 +722,24 @@ class HTTPGardenTab(IMessageEditorTab):
         
         # Store request content for keyboard shortcuts
         if isRequest and content:
-            # Convert to string and store as UTF-8 bytes
-            request_string = self._extender._helpers.bytesToString(content)
-            self._extender._last_request_content = request_string.encode('utf-8')
+            # Convert to bytes and then to REPL format
+            if hasattr(content, '__len__') and hasattr(content, '__getitem__'):
+                # Convert Burp's byte array to Python bytes
+                request_bytes = bytes([content[i] & 0xFF for i in range(len(content))])
+            else:
+                request_bytes = bytes(content)
+            
+            # Store as REPL formatted string
+            self._extender._last_request_content = self._extender._bytes_to_repl_format(request_bytes)
             
             # Debug: Show what request we captured
+            try:
+                request_preview = request_bytes.decode('utf-8', errors='replace')[:200]
+            except:
+                request_preview = repr(request_bytes)[:200]
+            
             self._extender._stdout.println("HTTP Garden: Captured request content:")
-            self._extender._stdout.println("Preview: {}...".format(request_string[:200].replace('\r', '\\r').replace('\n', '\\n')))
+            self._extender._stdout.println("Preview: {}...".format(request_preview.replace('\r', '\\r').replace('\n', '\\n')))
         
         if isRequest:
             # This is a request tab - check for cached results
