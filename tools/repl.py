@@ -2,6 +2,8 @@
 
 import itertools
 import shlex
+import readline
+import rlcompleter
 
 from diff import ErrorType
 from fanout import (
@@ -139,8 +141,131 @@ def validate_transducer_names(transducer_names: list[str]) -> bool:
     return True
 
 
+# Tab completion setup
+class GardenCompleter:
+    def __init__(self):
+        self.commands = [
+            'payload', 'history', 'grid', 'fanout', 'unparsed_fanout', 'uf',
+            'unparsed_transducer_fanout', 'utf', 'transduce', 't', 'help', 'servers', 'transducers', 'quit', 'exit'
+        ]
+        self.servers = list(SERVER_DICT.keys())
+        self.transducers = list(TRANSDUCER_DICT.keys())
+        
+    def complete(self, text, state):
+        """Return the next possible completion for 'text'."""
+        if state == 0:
+            # Parse the current line to understand context
+            line = readline.get_line_buffer()
+            tokens = line.split()
+            
+            if not tokens or (len(tokens) == 1 and not line.endswith(' ')):
+                # Completing command name
+                self.matches = [cmd for cmd in self.commands if cmd.startswith(text)]
+            else:
+                # Completing arguments based on command
+                command = tokens[0]
+                if command in ['grid', 'fanout', 'unparsed_fanout', 'uf']:
+                    # Complete with server names
+                    self.matches = [server for server in self.servers if server.startswith(text)]
+                elif command in ['unparsed_transducer_fanout', 'utf', 'transduce', 't']:
+                    # Complete with transducer names
+                    self.matches = [trans for trans in self.transducers if trans.startswith(text)]
+                else:
+                    self.matches = []
+        
+        try:
+            return self.matches[state]
+        except IndexError:
+            return None
+
+
+def print_help():
+    """Print comprehensive help information."""
+    help_text = """
+\x1b[1;32mHTTP Garden REPL Help\x1b[0m
+
+\x1b[1;34mBasic Commands:\x1b[0m
+  \x1b[0;36mhelp\x1b[0m                    Show this help message
+  \x1b[0;36mservers\x1b[0m                 List all available servers
+  \x1b[0;36mtransducers\x1b[0m             List all available transducers
+  \x1b[0;36mquit\x1b[0m / \x1b[0;36mexit\x1b[0m             Exit the REPL
+
+\x1b[1;34mPayload Management:\x1b[0m
+  \x1b[0;36mpayload\x1b[0m                 Show current payload
+  \x1b[0;36mpayload <data>\x1b[0m          Set new payload (can be multiple strings)
+  \x1b[0;36mhistory\x1b[0m                 Show all payload history
+
+\x1b[1;34mTesting Commands:\x1b[0m
+  \x1b[0;36mgrid [servers...]\x1b[0m       Show compatibility grid for servers
+  \x1b[0;36mfanout [servers...]\x1b[0m     Show parsed responses from servers
+  \x1b[0;36munparsed_fanout [servers...]\x1b[0m  Show raw responses from servers
+  \x1b[0;36muf [servers...]\x1b[0m         Alias for unparsed_fanout
+
+\x1b[1;34mTransducer Commands:\x1b[0m
+  \x1b[0;36munparsed_transducer_fanout [transducers...]\x1b[0m  Show raw responses from transducers
+  \x1b[0;36mutf [transducers...]\x1b[0m    Alias for unparsed_transducer_fanout
+  \x1b[0;36mtransduce <transducers...>\x1b[0m  Chain payload through transducers
+  \x1b[0;36mt <transducers...>\x1b[0m      Alias for transduce
+
+\x1b[1;34mExamples:\x1b[0m
+  \x1b[0;33mpayload 'GET / HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n'\x1b[0m
+    Set a basic GET request as payload
+
+  \x1b[0;33mgrid nginx gunicorn hyper\x1b[0m
+    Compare how nginx, gunicorn, and hyper handle the current payload
+
+  \x1b[0;33mtransduce haproxy nginx_proxy\x1b[0m
+    Send payload through HAProxy, then through Nginx proxy
+
+  \x1b[0;33mfanout\x1b[0m
+    Test current payload against all available servers
+
+\x1b[1;34mNotes:\x1b[0m
+  • Commands can be chained with semicolons: \x1b[0;33mpayload 'GET /'; grid\x1b[0m
+  • Use quotes for payloads with spaces or special characters
+  • Use \\r\\n for HTTP line endings in payloads
+  • Tab completion is available for commands and server/transducer names
+  • Press Ctrl+C to cancel current input, Ctrl+D to exit
+"""
+    print(help_text)
+
+
+def print_servers():
+    """Print all available servers."""
+    print("\x1b[1;34mAvailable Servers:\x1b[0m")
+    servers = sorted(SERVER_DICT.keys())
+    for i, server in enumerate(servers):
+        if i % 4 == 0:
+            print()
+        print(f"  \x1b[0;36m{server:<20}\x1b[0m", end="")
+    print("\n")
+
+
+def print_transducers():
+    """Print all available transducers."""
+    print("\x1b[1;34mAvailable Transducers:\x1b[0m")
+    transducers = sorted(TRANSDUCER_DICT.keys())
+    for i, transducer in enumerate(transducers):
+        if i % 4 == 0:
+            print()
+        print(f"  \x1b[0;36m{transducer:<20}\x1b[0m", end="")
+    print("\n")
+
+
 
 def main() -> None:
+    # Set up tab completion
+    completer = GardenCompleter()
+    readline.set_completer(completer.complete)
+    readline.parse_and_bind('tab: complete')
+    
+    # Enable history
+    readline.set_history_length(1000)
+    
+    print("\x1b[1;32mWelcome to the HTTP Garden REPL!\x1b[0m")
+    print("Type '\x1b[0;36mhelp\x1b[0m' for available commands, or use tab completion.")
+    print()
+    
     payload_history: list[list[bytes]] = [_INITIAL_PAYLOAD]
     while True:
         try:
@@ -239,6 +364,15 @@ def main() -> None:
                             payload_history.append(tmp)
                         else:
                             print_stream(tmp, len(payload_history) - 1)
+                case ["help"]:
+                    print_help()
+                case ["servers"]:
+                    print_servers()
+                case ["transducers"]:
+                    print_transducers()
+                case ["quit"] | ["exit"]:
+                    print("Goodbye!")
+                    return
                 case _:
                     invalid_syntax()
 
