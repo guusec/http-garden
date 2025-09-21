@@ -1,6 +1,7 @@
 """The Garden repl"""
 
 import itertools
+import readline
 import shlex
 import sys
 from typing import TypeGuard, Any, Iterable
@@ -287,7 +288,74 @@ def is_byte_stream(l: Any) -> TypeGuard[list[bytes]]:
     return result
 
 
+# Command definitions for autocomplete and help
+COMMANDS = {
+    "payload": {"aliases": ["p"], "description": "Create or display byte stream payload"},
+    "grid": {"aliases": ["g"], "description": "Generate comparison grid from fanout results"},
+    "cluster": {"aliases": ["c"], "description": "Group servers with similar responses"},
+    "transduce": {"aliases": ["t"], "description": "Transform payload through transducers"},
+    "fanout": {"aliases": ["f"], "description": "Send payload to multiple servers"},
+    "h2fanout": {"aliases": ["h2f"], "description": "Send payload to HTTP/2 capable servers"},
+    "unparsed_fanout": {"aliases": ["uf"], "description": "Send payload and show raw responses"},
+    "unparsed_transducer_fanout": {"aliases": ["utf"], "description": "Send payload through transducers showing raw responses"},
+    "h2frames": {"aliases": ["h2"], "description": "Create HTTP/2 frames"},
+    "help": {"aliases": ["?"], "description": "Show this help message"},
+    "exit": {"aliases": ["quit", "q"], "description": "Exit the REPL"},
+}
+
+# Create reverse mapping for aliases
+COMMAND_ALIASES = {}
+for cmd, info in COMMANDS.items():
+    COMMAND_ALIASES[cmd] = cmd
+    for alias in info["aliases"]:
+        COMMAND_ALIASES[alias] = cmd
+
+
+def completer(text, state):
+    """Tab completion function for readline"""
+    options = []
+
+    # Get all possible commands and aliases
+    all_commands = list(COMMANDS.keys()) + [alias for aliases in [info["aliases"] for info in COMMANDS.values()] for alias in aliases]
+
+    # Add server names from ORIGIN_DICT and TRANSDUCER_DICT
+    all_commands.extend(ORIGIN_DICT.keys())
+    all_commands.extend(TRANSDUCER_DICT.keys())
+
+    # Filter commands that start with the current text
+    if text:
+        options = [cmd for cmd in all_commands if cmd.startswith(text)]
+    else:
+        options = all_commands
+
+    try:
+        return options[state]
+    except IndexError:
+        return None
+
+
+def show_help():
+    """Display help information"""
+    print("\nAvailable commands:")
+    print("==================")
+    for cmd, info in COMMANDS.items():
+        aliases_str = ", ".join(info["aliases"]) if info["aliases"] else ""
+        if aliases_str:
+            print(f"  {cmd} ({aliases_str}): {info['description']}")
+        else:
+            print(f"  {cmd}: {info['description']}")
+    print()
+    print("Pipeline operators: | (pipe), ; (sequence)")
+    print("Available servers:", ", ".join(sorted(ORIGIN_DICT.keys())))
+    print("Available transducers:", ", ".join(sorted(TRANSDUCER_DICT.keys())))
+    print()
+
+
 def main() -> None:
+    # Setup readline for tab completion
+    readline.set_completer(completer)
+    readline.parse_and_bind("tab: complete")
+
     while True:
         try:
             line: str = input("\x1b[0;32mgarden>\x1b[0m ")  # Green
@@ -309,6 +377,10 @@ def main() -> None:
         for pipeline in pipelines:
             cwd: None | list[bytes] | list[list[HTTPRequest | HTTPResponse]] = None
             for command in pipeline:
+                # Normalize command using aliases
+                if command and command[0] in COMMAND_ALIASES:
+                    command[0] = COMMAND_ALIASES[command[0]]
+
                 match command:
                     case []:
                         pass
@@ -390,7 +462,9 @@ def main() -> None:
                                 cwd = [frame_bytes]
                         except REPLParseError as e:
                             print(f"repl parse error: {e}")
-                    case ["exit" | "quit"]:
+                    case ["help" | "?"]:
+                        show_help()
+                    case ["exit" | "quit" | "q"]:
                         print("Next time, just press Ctrl-D :)")
                         sys.exit(0)
                     case _:
